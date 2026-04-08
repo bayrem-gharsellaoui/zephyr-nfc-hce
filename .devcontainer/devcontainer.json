@@ -1,0 +1,85 @@
+{
+  "image": "ghcr.io/zephyrproject-rtos/zephyr-build:v0.28.0",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workdir/application,type=bind",
+  "workspaceFolder": "/workdir",
+  "postCreateCommand": "west init -l application && west update && west zephyr-export && sudo /opt/python/venv/bin/pip install -r /workdir/dependencies/zephyr/scripts/requirements.txt",
+  "mounts": [
+    "source=${localWorkspaceFolder}/.vscode/,target=/workdir/.vscode,type=bind,consistency=cached"
+  ],
+  "runArgs": [
+    "--privileged",
+    "--device=/dev/bus/usb:/dev/bus/usb"
+  ],
+  "remoteUser": "user",
+  "containerEnv": {
+    "ZEPHYR_BASE": "/workdir/dependencies/zephyr"
+  },
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "bash",
+        "editor.renderWhitespace": "all",
+        "editor.rulers": [
+          100
+        ],
+        "editor.fontFamily": "'Fira Code', monospace",
+        "editor.fontLigatures": true,
+        "workbench.iconTheme": "material-icon-theme",
+        "C_Cpp.default.compilerPath": "/opt/toolchains/zephyr-sdk-${containerEnv:ZSDK_VERSION}/arm-zephyr-eabi/bin/arm-zephyr-eabi-gcc",
+        "C_Cpp.default.compileCommands": "${workspaceFolder}/app/build/compile_commands.json",
+        "cortex-debug.openocdPath.linux": "/opt/toolchains/zephyr-sdk-${containerEnv:ZSDK_VERSION}/sysroots/x86_64-pokysdk-linux/usr/bin/openocd",
+        "files.associations": {
+          "*.overlay": "DeviceTree",
+          "*.dts": "DeviceTree",
+          "*.dtsi": "DeviceTree"
+        }
+      },
+      "keybindings": [
+        {
+          "key": "ctrl+j",
+          "command": "editor.action.joinLines",
+          "when": "editorTextFocus"
+        },
+        {
+          "key": "ctrl+shift+k",
+          "command": "editor.action.commentLine",
+          "when": "editorTextFocus"
+        },
+        {
+          "key": "ctrl+alt+k",
+          "command": "editor.action.blockComment",
+          "when": "editorTextFocus"
+        },
+        {
+          "key": "ctrl+t",
+          "command": "workbench.action.terminal.new",
+          "when": "editorTextFocus"
+        },
+        {
+          "key": "alt+left",
+          "command": "workbench.action.navigateBack"
+        },
+        {
+          "key": "alt+right",
+          "command": "workbench.action.navigateForward"
+        }
+      ],
+      "extensions": [
+        "ms-vscode.cpptools",
+        "ms-python.python",
+        "ms-vscode.vscode-embedded-tools",
+        "marus25.cortex-debug",
+        "plorefice.devicetree",
+        "PKief.material-icon-theme",
+        "streetsidesoftware.code-spell-checker",
+        "eamodio.gitlens",
+        "ms-vscode.hexeditor",
+        "dan-c-underwood.arm",
+        "ZixuanWang.linkerscript",
+        "Gruntfuggly.todo-tree",
+        "ms-python.black-formatter",
+        "bierner.markdown-mermaid"
+      ]
+    }
+  }
+}

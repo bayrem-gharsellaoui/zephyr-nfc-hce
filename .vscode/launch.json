@@ -1,0 +1,68 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Cortex Debug",
+            "cwd": "${workspaceFolder}",
+            "executable": "${workspaceFolder}/application/build/zephyr/zephyr.elf",
+            "request": "launch",
+            "type": "cortex-debug",
+            "runToEntryPoint": "main",
+            "servertype": "openocd",
+            "serverpath": "/opt/toolchains/zephyr-sdk-${env:ZSDK_VERSION}/sysroots/x86_64-pokysdk-linux/usr/bin/openocd",
+            "device": "${input:device}",
+            "interface": "swd",
+            "gdbPath": "/opt/toolchains/zephyr-sdk-${env:ZSDK_VERSION}/arm-zephyr-eabi/bin/arm-zephyr-eabi-gdb",
+            "armToolchainPath": "/opt/toolchains/zephyr-sdk-${env:ZSDK_VERSION}/arm-zephyr-eabi/bin",
+            "toolchainPrefix": "arm-zephyr-eabi",
+            "configFiles": [
+                "${workspaceFolder}/dependencies/zephyr/boards/st/${input:board}/support/openocd.cfg"
+            ],
+            "searchDir": [
+                "${workspaceFolder}/dependencies/zephyr/boards/st/${input:board}/support"
+            ],
+            "showDevDebugOutput": "raw",
+        },
+        {
+            "name": "Native Sim Debug",
+            "cwd": "${workspaceFolder}/application",
+            "program": "${workspaceFolder}/application/build/zephyr/zephyr.exe",
+            "request": "launch",
+            "type": "cppdbg",
+            "miDebuggerPath": "/usr/bin/gdb",
+            "MIMode": "gdb",
+            "args": [],
+            "stopAtEntry": true,
+            "environment": [],
+            "externalConsole": false,
+            "setupCommands": [
+                {
+                    "text": "-enable-pretty-printing"
+                }
+            ],
+        }
+    ],
+    "inputs": [
+        {
+            "id": "device",
+            "type": "pickString",
+            "description": "Select the device to debug",
+            "default": "STM32U575ZI",
+            "options": [
+                "STM32U575ZI"
+            ]
+        },
+        {
+            "id": "board",
+            "type": "pickString",
+            "description": "Select the board configuration",
+            "default": "b_u585i_iot02a",
+            "options": [
+                "b_u585i_iot02a"
+            ]
+        }
+    ]
+}

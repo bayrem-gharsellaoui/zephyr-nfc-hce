@@ -1,0 +1,22 @@
+manifest:
+
+  defaults:
+    remote: zephyrproject
+
+  remotes:
+    - name: zephyrproject
+      url-base: https://github.com/zephyrproject-rtos
+
+  projects:
+    - name: zephyr
+      repo-path: zephyr
+      revision: v4.3.0
+      path: zephyr
+      import:
+        path-prefix: dependencies
+        name-allowlist:
+          - cmsis_6
+          - hal_stm32
+
+  self:
+    path: application
