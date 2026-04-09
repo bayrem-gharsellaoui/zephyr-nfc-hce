@@ -5,12 +5,12 @@
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
 
-static const struct device *const uart_dev = DEVICE_DT_GET(DT_ALIAS(pn532_uart));
-
 RING_BUF_DECLARE(uart_ring_buf, 256U);
 K_SEM_DEFINE(uart_rx_sem, 0, 1);
 
-static void uart_cb(const struct device *dev, void *user_data)
+static const struct device *const uart_dev = DEVICE_DT_GET(DT_ALIAS(pn532_uart));
+
+static void pn532_uart_cb(const struct device *dev, void *user_data)
 {
     ARG_UNUSED(user_data);
     uint8_t buf[32] = {0};
@@ -22,6 +22,30 @@ static void uart_cb(const struct device *dev, void *user_data)
             k_sem_give(&uart_rx_sem);
         }
     }
+}
+
+static void pn532_uart_send(uint8_t *frame, size_t len)
+{
+    LOG_HEXDUMP_DBG(frame, len, "TX");
+
+    for (size_t i = 0; i < len; i++) {
+        uart_poll_out(uart_dev, frame[i]);
+    }
+}
+
+static int pn532_wait_for_bytes(size_t needed, int timeout_ms)
+{
+    int64_t start = k_uptime_get();
+
+    while (ring_buf_size_get(&uart_ring_buf) - ring_buf_space_get(&uart_ring_buf) < needed) {
+        if (k_uptime_get() - start > timeout_ms) {
+            return -ETIMEDOUT;
+        }
+
+        k_sem_take(&uart_rx_sem, K_MSEC(1));
+    }
+
+    return 0;
 }
 
 static size_t pn532_build_frame(uint8_t *cmd, uint8_t cmdlen, uint8_t *frame)
@@ -51,15 +75,6 @@ static size_t pn532_build_frame(uint8_t *cmd, uint8_t cmdlen, uint8_t *frame)
     return 8 + cmdlen;
 }
 
-static void pn532_uart_send(uint8_t *frame, size_t len)
-{
-    LOG_HEXDUMP_DBG(frame, len, "TX");
-
-    for (size_t i = 0; i < len; i++) {
-        uart_poll_out(uart_dev, frame[i]);
-    }
-}
-
 static int pn532_send_cmd(uint8_t *cmd, uint8_t cmd_len,
                           uint8_t *resp, uint8_t *resp_len)
 {
@@ -73,27 +88,41 @@ static int pn532_send_cmd(uint8_t *cmd, uint8_t cmd_len,
     /* 2. Send frame via UART */
     pn532_uart_send(cmd_frame, frame_len);
 
-    /* 3. Wait for RX indication (for ack) */
-    if (k_sem_take(&uart_rx_sem, K_MSEC(100)) != 0) {
+    /* 3. Wait for ACK 6 bytes to arrive on UART, read it and verify it */
+    if (pn532_wait_for_bytes(6, 100) != 0) {
         LOG_ERR("Timeout waiting for ACK");
         return -ETIMEDOUT;
     }
-
-    /* 4. Read and verify ACK */
-    ring_buf_get(&uart_ring_buf, ack_frame, sizeof(ack_frame));
+    ring_buf_get(&uart_ring_buf, ack_frame, 6);
     LOG_HEXDUMP_DBG(ack_frame, 6, "ACK");
     if (memcmp(ack_frame, expected_ack_frame, 6) != 0) {
         LOG_ERR("ACK invalid");
         return -1;
     }
 
-    /* 5. Wait for RX indication again (but this time for the actual response) */
-    if (k_sem_take(&uart_rx_sem, K_MSEC(200)) != 0) {
-        LOG_ERR("Timeout waiting for response");
+    /* 4. Wait for response header to arrive on UART */
+    if (pn532_wait_for_bytes(6, 200) != 0) {
+        LOG_ERR("Timeout waiting for response header");
         return -ETIMEDOUT;
     }
 
-    /* TODO: 6. Read response */
+    uint8_t header[6] = {0};
+    ring_buf_get(&uart_ring_buf, header, 6);
+    if (header[0] != 0x00 || header[1] != 0x00 || header[2] != 0xFF) {
+        LOG_ERR("Invalid frame start");
+        return -1;
+    }
+
+    uint8_t len = header[3];
+
+    /* 5. Wait for response body to arrive on UART */
+    if (pn532_wait_for_bytes(len + 2, 200) != 0) {
+        LOG_ERR("Timeout waiting for response body");
+        return -ETIMEDOUT;
+    }
+
+    ring_buf_get(&uart_ring_buf, resp, len + 2);
+    *resp_len = len + 2;
 
     return 0;
 }
@@ -105,7 +134,7 @@ int main(void)
         return -1;
     }
 
-    uart_irq_callback_user_data_set(uart_dev, uart_cb, NULL);
+    uart_irq_callback_user_data_set(uart_dev, pn532_uart_cb, NULL);
     uart_irq_rx_enable(uart_dev);
     LOG_INF("UART ready");
 
@@ -116,7 +145,7 @@ int main(void)
 
     LOG_INF("Getting firmware version...");
     uint8_t cmd[] = {0x02};
-    uint8_t resp[32];
+    uint8_t resp[32] = {0};
     uint8_t resp_len = sizeof(resp);
     if (pn532_send_cmd(cmd, sizeof(cmd), resp, &resp_len) == 0) {
         LOG_INF("Command success");
