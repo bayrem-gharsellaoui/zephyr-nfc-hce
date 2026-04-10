@@ -82,14 +82,18 @@ static int pn532_send_cmd(uint8_t *cmd, uint8_t cmd_len,
     uint8_t ack_frame[6] = {0};
     const uint8_t expected_ack_frame[6] = {0x00, 0x00, 0xFF, 0x00, 0xFF, 0x00};
 
+    /* 0. Flush UART buffer */
+    ring_buf_reset(&uart_ring_buf);
+
     /* 1. Build command frame */
     size_t frame_len = pn532_build_frame(cmd, cmd_len, cmd_frame);
 
     /* 2. Send frame via UART */
     pn532_uart_send(cmd_frame, frame_len);
+    k_msleep(2000);
 
     /* 3. Wait for ACK 6 bytes to arrive on UART, read it and verify it */
-    if (pn532_wait_for_bytes(6, 100) != 0) {
+    if (pn532_wait_for_bytes(6, 2000) != 0) {
         LOG_ERR("Timeout waiting for ACK");
         return -ETIMEDOUT;
     }
@@ -101,7 +105,7 @@ static int pn532_send_cmd(uint8_t *cmd, uint8_t cmd_len,
     }
 
     /* 4. Wait for response header to arrive on UART */
-    if (pn532_wait_for_bytes(6, 200) != 0) {
+    if (pn532_wait_for_bytes(6, 2000) != 0) {
         LOG_ERR("Timeout waiting for response header");
         return -ETIMEDOUT;
     }
