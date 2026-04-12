@@ -2,125 +2,184 @@
 #include <zephyr/device.h>
 #include <zephyr/drivers/uart.h>
 #include <zephyr/logging/log.h>
-#include <zephyr/sys/ring_buffer.h>
 LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
 
 static const struct device *const uart_dev = DEVICE_DT_GET(DT_ALIAS(pn532_uart));
 
-RING_BUF_DECLARE(uart_ringbuf, 256);
-
-static void uart_cb(const struct device *dev, void *user_data)
-{
-    ARG_UNUSED(user_data);
-
-    uint8_t buf[32] = {0};
-
-    while (uart_irq_update(dev) && uart_irq_rx_ready(dev)) {
-        int len = uart_fifo_read(dev, buf, sizeof(buf));
-        if (len > 0) {
-            ring_buf_put(&uart_ringbuf, buf, len);
-        }
-    }
-}
-
-static void uart_write(const struct device *uart, const uint8_t *data, size_t len)
+void pn532_uart_send(const uint8_t *data, size_t len)
 {
     for (size_t i = 0; i < len; i++) {
-        uart_poll_out(uart, data[i]);
+        uart_poll_out(uart_dev, data[i]);
+    }
+
+    LOG_HEXDUMP_INF(data, len, "TX");
+}
+
+int pn532_uart_read(uint8_t *buf, size_t max_len, int timeout_ms)
+{
+    int64_t end = k_uptime_get() + timeout_ms;
+    int64_t now;
+    size_t idx = 0;
+
+    while (idx < max_len) {
+        now = k_uptime_get();
+        if (now >= end) {
+            break;
+        }
+
+        uint8_t c;
+        if (uart_poll_in(uart_dev, &c) == 0) {
+            buf[idx++] = c;
+        } else {
+            k_yield();
+        }
+    }
+
+    if (idx > 0) {
+        LOG_HEXDUMP_INF(buf, idx, "RX");
+    } else {
+        LOG_WRN("RX timeout (%d ms)", timeout_ms);
+    }
+
+    return idx;
+}
+
+void pn532_uart_flush(void)
+{
+    uint8_t c;
+    while (uart_poll_in(uart_dev, &c) == 0) {
+        /* discard */
     }
 }
 
-static void flush_ring_buf(void)
+bool pn532_is_ack(uint8_t *buf)
 {
-    uint8_t dummy;
-    while (ring_buf_get(&uart_ringbuf, &dummy, 1) == 1);
+    const uint8_t ack[] = {0x00,0x00,0xFF,0x00,0xFF,0x00};
+    return memcmp(buf, ack, 6) == 0;
 }
 
-static void dump_uart_stream(void)
+void test_fw_version(void)
 {
-    uint8_t byte;
+    uint8_t cmd[] = {
+        0x00, 0xFF, 0x02, 0xFE,
+        0xD4, 0x02,
+        0x2A,
+        0x00
+    };
 
-    printk("RX: ");
-    while (ring_buf_get(&uart_ringbuf, &byte, 1) == 1) {
-        printk("%02X ", byte);
-    }
-    printk("\n");
-}
+    pn532_uart_send(cmd, sizeof(cmd));
 
-static void pn532_write_command(uint8_t *cmd, uint8_t cmdlen)
-{
-    uint8_t frame[64];
+    uint8_t buf[64];
 
-    uint8_t LEN = cmdlen + 1;
-    uint8_t LCS = ~LEN + 1;
-
-    uint8_t sum = 0;
-
-    frame[0] = 0x00;
-    frame[1] = 0x00;
-    frame[2] = 0xFF;
-    frame[3] = LEN;
-    frame[4] = LCS;
-    frame[5] = 0xD4;
-
-    sum += 0xD4;
-
-    for (uint8_t i = 0; i < cmdlen; i++) {
-        frame[6 + i] = cmd[i];
-        sum += cmd[i];
+    // Read ACK
+    pn532_uart_read(buf, 6, 100);
+    if (!pn532_is_ack(buf)) {
+        LOG_ERR("No ACK");
+        return;
     }
 
-    uint8_t DCS = ~sum + 1;
+    // Read response
+    int len = pn532_uart_read(buf, sizeof(buf), 200);
 
-    frame[6 + cmdlen] = DCS;
-    frame[7 + cmdlen] = 0x00;
-
-    printk("TX: ");
-    for (int i = 0; i < 8 + cmdlen; i++) {
-        printk("%02X ", frame[i]);
+    if (len > 0) {
+        LOG_INF("Got response");
     }
-    printk("\n");
-
-    uart_write(uart_dev, frame, 8 + cmdlen);
 }
 
 int main(void)
 {
+    uint8_t buf[64] = {0};
+    int len = 0;
+
     if (!device_is_ready(uart_dev)) {
         LOG_ERR("UART not ready");
         return -1;
     }
+    LOG_INF("UART ready");
 
-    /* Enable UART RX interrupt */
-    uart_irq_callback_user_data_set(uart_dev, uart_cb, NULL);
-    uart_irq_rx_enable(uart_dev);
+    LOG_INF("PN532 UART test starting...");
 
-    LOG_INF("UART interrupt enabled");
+    /* ---- Wakeup sequence ---- */
+    uint8_t wakeup[] = {0x55, 0x55, 0x00, 0x00, 0x00};
+    pn532_uart_send(wakeup, sizeof(wakeup));
 
-    /* ================= WAKEUP ================= */
-    LOG_INF("Waking up PN532...");
-    const uint8_t wakeup[] = {0x55, 0x00, 0x00};
-    uart_write(uart_dev, wakeup, sizeof(wakeup));
+    k_msleep(2);  // give PN532 time to wake up
+    pn532_uart_flush();
 
-    k_msleep(200); // give PN532 time
+    /* ---- SAMConfig ---- */
+    uint8_t samconfig_cmd[] = {
+        0x00, 0xFF, 0x05, 0xFB,
+        0xD4, 0x14,
+        0x01, 0x14, 0x01,
+        0x02,
+        0x00
+    };
 
-    flush_ring_buf();
+    pn532_uart_send(samconfig_cmd, sizeof(samconfig_cmd));
 
-    /* ================= TEST COMMAND ================= */
-    LOG_INF("Sending GetFirmwareVersion...");
-    uint8_t cmd[] = {0x02}; // GetFirmwareVersion
-    pn532_write_command(cmd, sizeof(cmd));
+    /* Read ACK */
+    len = pn532_uart_read(buf, 6, 200);
+    if (len != 6 || !pn532_is_ack(buf)) {
+        LOG_ERR("SAMConfig: No ACK");
+        return 0;
+    }
 
-    /* Wait for response */
-    k_msleep(200);
+    LOG_INF("SAMConfig ack OK");
 
-    dump_uart_stream();
+    /* Read response */
+    memset(buf, 0, sizeof(buf));
+    len = pn532_uart_read(buf, sizeof(buf), 300);
+    if (len <= 0) {
+        LOG_ERR("SAMConfig: No response");
+        return 0;
+    }
+
+    /* Optional check */
+    if (buf[6] != 0x15) {
+        LOG_ERR("SAMConfig failed");
+        return 0;
+    }
+
+    LOG_INF("SAMConfig response OK");
+
+    /* ---- getFirmwareVersion command ---- */
+    uint8_t cmd[] = {
+        0x00, 0xFF, 0x02, 0xFE,
+        0xD4, 0x02,
+        0x2A,
+        0x00
+    };
+
+    pn532_uart_send(cmd, sizeof(cmd));
+
+    /* ---- Read ACK ---- */
+    memset(buf, 0, sizeof(buf));
+    len = pn532_uart_read(buf, 6, 200);
+    if (len != 6 || !pn532_is_ack(buf)) {
+        LOG_ERR("ACK not received");
+        return 0;
+    }
+
+    LOG_INF("ACK OK");
+
+    /* ---- Read response ---- */
+    memset(buf, 0, sizeof(buf));
+    len = pn532_uart_read(buf, sizeof(buf), 300);
+    if (len <= 0) {
+        LOG_ERR("No response");
+        return 0;
+    }
+
+    LOG_INF("Response received");
+
+    uint8_t ic = buf[7];
+    uint8_t ver_major = buf[8];
+    uint8_t ver_minor = buf[9];
+    LOG_INF("Found chip PN5%02X", ic);
+    LOG_INF("Firmware version: %d.%d", ver_major, ver_minor);
 
     while (1) {
         k_msleep(1000);
-
-        /* continuously print anything incoming */
-        dump_uart_stream();
     }
 
     return 0;
