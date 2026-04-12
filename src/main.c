@@ -18,17 +18,27 @@ void pn532_uart_send(const uint8_t *data, size_t len)
 int pn532_uart_read(uint8_t *buf, size_t max_len, int timeout_ms)
 {
     int64_t end = k_uptime_get() + timeout_ms;
+    int64_t now;
     size_t idx = 0;
 
-    while (k_uptime_get() < end && idx < max_len) {
+    while (idx < max_len) {
+        now = k_uptime_get();
+        if (now >= end) {
+            break;
+        }
+
         uint8_t c;
         if (uart_poll_in(uart_dev, &c) == 0) {
             buf[idx++] = c;
+        } else {
+            k_yield();
         }
     }
 
     if (idx > 0) {
         LOG_HEXDUMP_INF(buf, idx, "RX");
+    } else {
+        LOG_WRN("RX timeout (%d ms)", timeout_ms);
     }
 
     return idx;
@@ -114,6 +124,8 @@ int main(void)
         return 0;
     }
 
+    LOG_INF("SAMConfig ack OK");
+
     /* Read response */
     memset(buf, 0, sizeof(buf));
     len = pn532_uart_read(buf, sizeof(buf), 300);
@@ -128,7 +140,7 @@ int main(void)
         return 0;
     }
 
-    LOG_INF("SAMConfig OK");
+    LOG_INF("SAMConfig response OK");
 
     /* ---- getFirmwareVersion command ---- */
     uint8_t cmd[] = {
