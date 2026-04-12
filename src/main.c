@@ -1,134 +1,71 @@
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/uart.h>
-#include <zephyr/sys/ring_buffer.h>
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
 
-RING_BUF_DECLARE(uart_ring_buf, 256U);
-K_SEM_DEFINE(uart_rx_sem, 0, 1);
-
 static const struct device *const uart_dev = DEVICE_DT_GET(DT_ALIAS(pn532_uart));
 
-static void pn532_uart_cb(const struct device *dev, void *user_data)
+void pn532_send(const uint8_t *data, size_t len)
 {
-    ARG_UNUSED(user_data);
-    uint8_t buf[32] = {0};
-
-    while (uart_irq_update(dev) && uart_irq_rx_ready(dev)) {
-        int len = uart_fifo_read(dev, buf, sizeof(buf));
-        if (len > 0) {
-            ring_buf_put(&uart_ring_buf, buf, len);
-            k_sem_give(&uart_rx_sem);
-        }
-    }
-}
-
-static void pn532_uart_send(uint8_t *frame, size_t len)
-{
-    LOG_HEXDUMP_DBG(frame, len, "TX");
-
     for (size_t i = 0; i < len; i++) {
-        uart_poll_out(uart_dev, frame[i]);
+        uart_poll_out(uart_dev, data[i]);
     }
+
+    LOG_HEXDUMP_INF(data, len, "TX");
 }
 
-static int pn532_wait_for_bytes(size_t needed, int timeout_ms)
+int pn532_read(uint8_t *buf, size_t max_len, int timeout_ms)
 {
-    int64_t start = k_uptime_get();
+    int64_t end = k_uptime_get() + timeout_ms;
+    size_t idx = 0;
 
-    while (ring_buf_size_get(&uart_ring_buf) - ring_buf_space_get(&uart_ring_buf) < needed) {
-        if (k_uptime_get() - start > timeout_ms) {
-            return -ETIMEDOUT;
+    while (k_uptime_get() < end && idx < max_len) {
+        uint8_t c;
+        if (uart_poll_in(uart_dev, &c) == 0) {
+            buf[idx++] = c;
         }
-
-        k_sem_take(&uart_rx_sem, K_MSEC(1));
     }
 
-    return 0;
+    if (idx > 0) {
+        LOG_HEXDUMP_INF(buf, idx, "RX");
+    }
+
+    return idx;
 }
 
-static size_t pn532_build_frame(uint8_t *cmd, uint8_t cmdlen, uint8_t *frame)
+bool pn532_is_ack(uint8_t *buf)
 {
-    uint8_t LEN = cmdlen + 1;
-    uint8_t LCS = ~LEN + 1;
-
-    uint8_t sum = 0;
-
-    frame[0] = 0x00;
-    frame[1] = 0x00;
-    frame[2] = 0xFF;
-    frame[3] = LEN;
-    frame[4] = LCS;
-    frame[5] = 0xD4;
-
-    sum += 0xD4;
-
-    for (uint8_t i = 0; i < cmdlen; i++) {
-        frame[6 + i] = cmd[i];
-        sum += cmd[i];
-    }
-
-    frame[6 + cmdlen] = ~sum + 1;
-    frame[7 + cmdlen] = 0x00;
-
-    return 8 + cmdlen;
+    const uint8_t ack[] = {0x00,0x00,0xFF,0x00,0xFF,0x00};
+    return memcmp(buf, ack, 6) == 0;
 }
 
-static int pn532_send_cmd(uint8_t *cmd, uint8_t cmd_len,
-                          uint8_t *resp, uint8_t *resp_len)
+void test_fw_version(void)
 {
-    uint8_t cmd_frame[64] = {0};
-    uint8_t ack_frame[6] = {0};
-    const uint8_t expected_ack_frame[6] = {0x00, 0x00, 0xFF, 0x00, 0xFF, 0x00};
+    uint8_t cmd[] = {
+        0x00, 0xFF, 0x02, 0xFE,
+        0xD4, 0x02,
+        0x2A,
+        0x00
+    };
 
-    /* 0. Flush UART buffer */
-    ring_buf_reset(&uart_ring_buf);
+    pn532_send(cmd, sizeof(cmd));
 
-    /* 1. Build command frame */
-    size_t frame_len = pn532_build_frame(cmd, cmd_len, cmd_frame);
+    uint8_t buf[64];
 
-    /* 2. Send frame via UART */
-    pn532_uart_send(cmd_frame, frame_len);
-    k_msleep(2000);
-
-    /* 3. Wait for ACK 6 bytes to arrive on UART, read it and verify it */
-    if (pn532_wait_for_bytes(6, 2000) != 0) {
-        LOG_ERR("Timeout waiting for ACK");
-        return -ETIMEDOUT;
-    }
-    ring_buf_get(&uart_ring_buf, ack_frame, 6);
-    LOG_HEXDUMP_DBG(ack_frame, 6, "ACK");
-    if (memcmp(ack_frame, expected_ack_frame, 6) != 0) {
-        LOG_ERR("ACK invalid");
-        return -1;
+    // Read ACK
+    pn532_read(buf, 6, 100);
+    if (!pn532_is_ack(buf)) {
+        LOG_ERR("No ACK");
+        return;
     }
 
-    /* 4. Wait for response header to arrive on UART */
-    if (pn532_wait_for_bytes(6, 2000) != 0) {
-        LOG_ERR("Timeout waiting for response header");
-        return -ETIMEDOUT;
+    // Read response
+    int len = pn532_read(buf, sizeof(buf), 200);
+
+    if (len > 0) {
+        LOG_INF("Got response");
     }
-
-    uint8_t header[6] = {0};
-    ring_buf_get(&uart_ring_buf, header, 6);
-    if (header[0] != 0x00 || header[1] != 0x00 || header[2] != 0xFF) {
-        LOG_ERR("Invalid frame start");
-        return -1;
-    }
-
-    uint8_t len = header[3];
-
-    /* 5. Wait for response body to arrive on UART */
-    if (pn532_wait_for_bytes(len + 2, 200) != 0) {
-        LOG_ERR("Timeout waiting for response body");
-        return -ETIMEDOUT;
-    }
-
-    ring_buf_get(&uart_ring_buf, resp, len + 2);
-    *resp_len = len + 2;
-
-    return 0;
 }
 
 int main(void)
@@ -137,33 +74,51 @@ int main(void)
         LOG_ERR("UART not ready");
         return -1;
     }
-
-    uart_irq_callback_user_data_set(uart_dev, pn532_uart_cb, NULL);
-    uart_irq_rx_enable(uart_dev);
     LOG_INF("UART ready");
 
-    LOG_INF("Waking up PN532...");
-    uint8_t wakeup[] = {0x55, 0x00, 0x00};
-    pn532_uart_send(wakeup, sizeof(wakeup));
-    k_msleep(100);
+    LOG_INF("PN532 UART test starting...");
 
-    LOG_INF("Getting firmware version...");
-    uint8_t cmd[] = {0x02};
-    uint8_t resp[32] = {0};
-    uint8_t resp_len = sizeof(resp);
-    if (pn532_send_cmd(cmd, sizeof(cmd), resp, &resp_len) == 0) {
-        LOG_INF("Command success");
-        /* Decode useful fields */
-        if (resp_len >= 6) {
-            uint8_t ic = resp[2];
-            uint8_t ver = resp[3];
-            uint8_t rev = resp[4];
+    /* ---- Wakeup sequence ---- */
+    uint8_t wakeup[] = {0x55, 0x55, 0x00, 0x00, 0x00};
+    pn532_send(wakeup, sizeof(wakeup));
 
-            LOG_INF("PN532 IC: 0x%02X, Firmware: %d.%d", ic, ver, rev);
-        }
-    } else {
-        LOG_ERR("Command failed");
+    k_msleep(100);  // give PN532 time to wake up
+
+    /* ---- getFirmwareVersion command ---- */
+    uint8_t cmd[] = {
+        0x00, 0xFF, 0x02, 0xFE,
+        0xD4, 0x02,
+        0x2A,
+        0x00
+    };
+
+    pn532_send(cmd, sizeof(cmd));
+
+    uint8_t buf[64] = {0};
+
+    /* ---- Read ACK ---- */
+    int len = pn532_read(buf, 6, 200);
+    if (len != 6 || !pn532_is_ack(buf)) {
+        LOG_ERR("ACK not received");
+        return 0;
     }
+
+    LOG_INF("ACK OK");
+
+    /* ---- Read response ---- */
+    len = pn532_read(buf, sizeof(buf), 300);
+    if (len <= 0) {
+        LOG_ERR("No response");
+        return 0;
+    }
+
+    LOG_INF("Response received");
+
+    uint8_t ic = buf[7];
+    uint8_t ver_major = buf[8];
+    uint8_t ver_minor = buf[9];
+    LOG_INF("Found chip PN5%02X", ic);
+    LOG_INF("Firmware version: %d.%d", ver_major, ver_minor);
 
     while (1) {
         k_msleep(1000);
