@@ -7,8 +7,7 @@ LOG_MODULE_REGISTER(test, LOG_LEVEL_INF);
 static const struct device *uart_dev = DEVICE_DT_GET(DT_ALIAS(pn532_uart));
 
 /* Simple RX buffer */
-#define RX_BUF_SIZE 64
-static uint8_t rx_buf[RX_BUF_SIZE];
+static uint8_t rx_buf[256] = {0};
 
 /* UART interrupt callback */
 static void uart_cb(const struct device *dev, void *user_data)
@@ -28,6 +27,16 @@ static void uart_cb(const struct device *dev, void *user_data)
     }
 }
 
+/* Correct TX function */
+static void uart_send(const uint8_t *data, size_t len)
+{
+    for (size_t i = 0; i < len; i++) {
+        uart_poll_out(uart_dev, data[i]);
+    }
+
+    LOG_HEXDUMP_INF(data, len, "TX");
+}
+
 int main(void)
 {
     if (!device_is_ready(uart_dev)) {
@@ -43,18 +52,24 @@ int main(void)
     /* Enable RX interrupt */
     uart_irq_rx_enable(uart_dev);
 
-    /* Send something */
-    const char msg[] = "PING\r\n";
+    /* ---- Wakeup ---- */
+    LOG_INF("Sending wakeup command");
+    uint8_t wakeup[] = {0x55, 0x55, 0x00, 0x00, 0x00};
+    uart_send(wakeup, sizeof(wakeup));
 
-    for (size_t i = 0; i < sizeof(msg) - 1; i++)
-    {
-        uart_poll_out(uart_dev, msg[i]);
-    }
-
-    LOG_INF("TX: %s", msg);
+    /* ---- SAMConfig ---- */
+    LOG_INF("Sending SAMConfig command");
+    uint8_t samconfig_cmd[] = {
+        0x00, 0xFF, 0x05, 0xFB,
+        0xD4, 0x14,
+        0x01, 0x14, 0x01,
+        0x02,
+        0x00
+    };
+    uart_send(samconfig_cmd, sizeof(samconfig_cmd));
 
     while (1) {
-        k_sleep(K_SECONDS(1));
+        k_sleep(K_MSEC(10));
     }
 
     return 0;
