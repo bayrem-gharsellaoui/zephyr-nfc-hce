@@ -6,9 +6,8 @@ LOG_MODULE_REGISTER(test, LOG_LEVEL_INF);
 
 static const struct device *uart_dev = DEVICE_DT_GET(DT_ALIAS(pn532_uart));
 
-/* Simple RX buffer */
 static uint8_t rx_buf[256] = {0};
-static size_t rx_len = 0;
+static volatile size_t rx_len = 0;
 
 /* UART interrupt callback */
 static void uart_cb(const struct device *dev, void *user_data)
@@ -28,7 +27,6 @@ static void uart_cb(const struct device *dev, void *user_data)
     }
 }
 
-/* Correct TX function */
 static void uart_send(const uint8_t *data, size_t len)
 {
     for (size_t i = 0; i < len; i++) {
@@ -71,7 +69,7 @@ static bool pn532_send_command(const uint8_t *cmd, size_t cmd_len)
     /* Send command */
     uart_send(cmd, cmd_len);
 
-    /* ---- Wait for ACK ---- */
+    /* Wait for ACK */
     if (!wait_for_rx(6, 200)) {
         LOG_ERR("Timeout waiting for ACK");
         return false;
@@ -84,8 +82,7 @@ static bool pn532_send_command(const uint8_t *cmd, size_t cmd_len)
 
     LOG_INF("ACK received");
 
-    /* ---- Wait for response ---- */
-    //* If we already have more than ACK, response is there */
+    /* If response already in buffer */
     if (rx_len > 6) {
         LOG_INF("Response already received");
         return true;
@@ -93,7 +90,6 @@ static bool pn532_send_command(const uint8_t *cmd, size_t cmd_len)
 
     /* Otherwise wait for more */
     int64_t end = k_uptime_get() + 300;
-
     while (k_uptime_get() < end) {
         if (rx_len > 6) {
             LOG_INF("Response received");
@@ -113,12 +109,9 @@ int main(void)
         return 0;
     }
 
-    LOG_INF("UART interrupt test started");
+    LOG_INF("PN532 test started");
 
-    /* Set callback */
     uart_irq_callback_user_data_set(uart_dev, uart_cb, NULL);
-
-    /* Enable RX interrupt */
     uart_irq_rx_enable(uart_dev);
 
     /* ---- Wakeup ---- */
@@ -138,12 +131,59 @@ int main(void)
 
     if (!pn532_send_command(samconfig_cmd, sizeof(samconfig_cmd))) {
         LOG_ERR("SAMConfig failed");
-    } else {
-        LOG_INF("SAMConfig OK");
+        return 0;
     }
 
+    /* Check SAMConfig response manually */
+    if ((rx_len < 8) || (rx_buf[6] != 0x15)) {
+        LOG_ERR("Invalid SAMConfig response");
+        return 0;
+    }
+
+    LOG_INF("SAMConfig OK");
+
+    /* ---- GetFirmwareVersion ---- */
+    LOG_INF("Sending GetFirmwareVersion");
+    uint8_t fw_cmd[] = {
+        0x00, 0xFF, 0x02, 0xFE,
+        0xD4, 0x02,
+        0x2A,
+        0x00
+    };
+
+    if (!pn532_send_command(fw_cmd, sizeof(fw_cmd))) {
+        LOG_ERR("GetFirmwareVersion failed");
+        return 0;
+    }
+
+    /* Parse firmware response manually */
+    if (rx_len < 12) {
+        LOG_ERR("Response too short");
+        return 0;
+    }
+    /*
+     * Expected:
+     * ... D5 03 IC Ver Rev Support ...
+     * indexes:
+     * rx_buf[6] = 0x03
+     * rx_buf[7] = IC
+     * rx_buf[8] = Ver
+     * rx_buf[9] = Rev
+     */
+    if (rx_buf[6] != 0x03) {
+        LOG_ERR("Unexpected response code: 0x%02X", rx_buf[6]);
+        return 0;
+    }
+
+    uint8_t ic  = rx_buf[7];
+    uint8_t ver = rx_buf[8];
+    uint8_t rev = rx_buf[9];
+
+    LOG_INF("Found PN5%02X", ic);
+    LOG_INF("Firmware version: %d.%d", ver, rev);
+
     while (1) {
-        k_sleep(K_MSEC(10));
+        k_sleep(K_SECONDS(1));
     }
 
     return 0;
