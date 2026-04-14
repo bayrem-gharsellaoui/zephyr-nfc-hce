@@ -9,6 +9,48 @@ static const struct device *uart_dev = DEVICE_DT_GET(DT_ALIAS(pn532_uart));
 static uint8_t rx_buf[256] = {0};
 static volatile size_t rx_len = 0;
 
+static const uint8_t ack[] = {
+    0x00, /* Preamble */
+    0x00, /* Start code 1 */
+    0xFF, /* Start code 2 */
+    0x00, /* LEN  = 0 (no payload) */
+    0xFF, /* LCS  = 0x100 - LEN = 0x100 - 0x00 = 0xFF */
+    0x00  /* Postamble */
+};
+
+static const uint8_t wakeup_cmd[] = {
+    0x55, /* Dummy byte (wakeup pattern, generates clock edges) */
+    0x55, /* Dummy byte (ensures PN532 exits power-down) */
+    0x00, /* Preamble (start of a "fake" frame) */
+    0x00, /* Start code 1 */
+    0x00  /* (Not a valid frame, just padding / noise) */
+};
+
+static const uint8_t SAMConfig_cmd[] = {
+    0x00, /* Preamble */
+    0xFF, /* Start code 1 */
+    0x05, /* LEN = 5 bytes of payload (TFI + DATA) */
+    0xFB, /* LCS = 0x100 - 0x05 = 0xFB */
+    0xD4, /* TFI (Frame Identifier): D4 = Host → PN532 */
+    0x14, /* Command: SAMConfiguration */
+    0x01, /* Mode: 0x01 = Normal mode */
+    0x14, /* Timeout: 0x14 = 20 (in units of 50 ms → 1 second) */
+    0x01, /* IRQ usage: 0x01 = Use IRQ pin (optional depending on setup) */
+    0x02, /* DCS (Data Checksum): Checksum of TFI + DATA: */
+    0x00  /* Postamble */
+};
+
+static uint8_t GetFirmwareVersion_cmd[] = {
+    0x00, /* Preamble */
+    0xFF, /* Start code 1 */
+    0x02, /* LEN = 2 bytes of payload (TFI + DATA) */
+    0xFE, /* LCS = 0x100 - 0x02 = 0xFE */
+    0xD4, /* TFI (Frame Identifier): D4 = Host → PN532 */
+    0x02, /* Command: GetFirmwareVersion */
+    0x2A, /* DCS (Data Checksum): Checksum of TFI + DATA */
+    0x00  /* Postamble */
+};
+
 /* UART interrupt callback */
 static void uart_cb(const struct device *dev, void *user_data)
 {
@@ -50,45 +92,34 @@ static bool wait_for_rx(size_t expected_len, int timeout_ms)
     return false;
 }
 
-static void rx_reset(void)
-{
-    rx_len = 0;
-}
-
-static bool is_ack(uint8_t *buf)
-{
-    const uint8_t ack[] = {0x00, 0x00, 0xFF, 0x00, 0xFF, 0x00};
-    return memcmp(buf, ack, 6) == 0;
-}
-
 static bool pn532_send_command(const uint8_t *cmd, size_t cmd_len)
 {
     /* Reset RX buffer */
-    rx_reset();
+    rx_len = 0;
 
     /* Send command */
     uart_send(cmd, cmd_len);
 
-    /* Wait for ACK */
-    if (!wait_for_rx(6, 200)) {
+    /* Wait for ACK (we’re willing to wait 200 ms for ack) */
+    if (!wait_for_rx(sizeof(ack), 200)) {
         LOG_ERR("Timeout waiting for ACK");
         return false;
     }
 
-    if (!is_ack(rx_buf)) {
+    if (memcmp(rx_buf, ack, sizeof(ack)) != 0) {
         LOG_ERR("Invalid ACK");
         return false;
     }
 
     LOG_INF("ACK received");
 
-    /* If response already in buffer */
+    /* Did the response already start arriving right after ACK? */
     if (rx_len > 6) {
         LOG_INF("Response already received");
         return true;
     }
 
-    /* Otherwise wait for more */
+    /* Otherwise wait for more 300 ms */
     int64_t end = k_uptime_get() + 300;
     while (k_uptime_get() < end) {
         if (rx_len > 6) {
@@ -116,24 +147,14 @@ int main(void)
 
     /* ---- Wakeup ---- */
     LOG_INF("Sending wakeup command");
-    uint8_t wakeup[] = {0x55, 0x55, 0x00, 0x00, 0x00};
-    uart_send(wakeup, sizeof(wakeup));
+    uart_send(wakeup_cmd, sizeof(wakeup_cmd));
 
     /* ---- SAMConfig ---- */
     LOG_INF("Sending SAMConfig command");
-    uint8_t samconfig_cmd[] = {
-        0x00, 0xFF, 0x05, 0xFB,
-        0xD4, 0x14,
-        0x01, 0x14, 0x01,
-        0x02,
-        0x00
-    };
-
-    if (!pn532_send_command(samconfig_cmd, sizeof(samconfig_cmd))) {
+    if (!pn532_send_command(SAMConfig_cmd, sizeof(SAMConfig_cmd))) {
         LOG_ERR("SAMConfig failed");
         return 0;
     }
-
     /* Check SAMConfig response manually */
     if ((rx_len < 8) || (rx_buf[6] != 0x15)) {
         LOG_ERR("Invalid SAMConfig response");
@@ -144,41 +165,22 @@ int main(void)
 
     /* ---- GetFirmwareVersion ---- */
     LOG_INF("Sending GetFirmwareVersion");
-    uint8_t fw_cmd[] = {
-        0x00, 0xFF, 0x02, 0xFE,
-        0xD4, 0x02,
-        0x2A,
-        0x00
-    };
-
-    if (!pn532_send_command(fw_cmd, sizeof(fw_cmd))) {
+    if (!pn532_send_command(GetFirmwareVersion_cmd, sizeof(GetFirmwareVersion_cmd))) {
         LOG_ERR("GetFirmwareVersion failed");
         return 0;
     }
-
     /* Parse firmware response manually */
     if (rx_len < 12) {
         LOG_ERR("Response too short");
         return 0;
     }
-    /*
-     * Expected:
-     * ... D5 03 IC Ver Rev Support ...
-     * indexes:
-     * rx_buf[6] = 0x03
-     * rx_buf[7] = IC
-     * rx_buf[8] = Ver
-     * rx_buf[9] = Rev
-     */
     if (rx_buf[6] != 0x03) {
         LOG_ERR("Unexpected response code: 0x%02X", rx_buf[6]);
         return 0;
     }
-
-    uint8_t ic  = rx_buf[7];
-    uint8_t ver = rx_buf[8];
-    uint8_t rev = rx_buf[9];
-
+    const uint8_t ic  = rx_buf[7];
+    const uint8_t ver = rx_buf[8];
+    const uint8_t rev = rx_buf[9];
     LOG_INF("Found PN5%02X", ic);
     LOG_INF("Firmware version: %d.%d", ver, rev);
 
