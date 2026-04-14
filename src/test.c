@@ -66,6 +66,10 @@ static void uart_cb(const struct device *dev, void *user_data)
             rx_len += len;
             LOG_HEXDUMP_INF(rx_buf, rx_len, "RX");
         }
+        if (rx_len >= sizeof(rx_buf)) {
+            LOG_ERR("RX buffer overflow");
+            rx_len = 0;
+        }
     }
 }
 
@@ -106,7 +110,7 @@ static bool pn532_send_command(const uint8_t *cmd, size_t cmd_len)
         return false;
     }
 
-    if (memcmp(rx_buf, ack, sizeof(ack)) != 0) {
+    if ((rx_len < sizeof(ack)) || (memcmp(rx_buf, ack, sizeof(ack)) != 0)) {
         LOG_ERR("Invalid ACK");
         return false;
     }
@@ -114,7 +118,7 @@ static bool pn532_send_command(const uint8_t *cmd, size_t cmd_len)
     LOG_INF("ACK received");
 
     /* Did the response already start arriving right after ACK? */
-    if (rx_len > 6) {
+    if (rx_len > sizeof(ack)) {
         LOG_INF("Response already received");
         return true;
     }
@@ -122,7 +126,7 @@ static bool pn532_send_command(const uint8_t *cmd, size_t cmd_len)
     /* Otherwise wait for more 300 ms */
     int64_t end = k_uptime_get() + 300;
     while (k_uptime_get() < end) {
-        if (rx_len > 6) {
+        if (rx_len > sizeof(ack)) {
             LOG_INF("Response received");
             return true;
         }
@@ -148,6 +152,9 @@ int main(void)
     /* ---- Wakeup ---- */
     LOG_INF("Sending wakeup command");
     uart_send(wakeup_cmd, sizeof(wakeup_cmd));
+#if !defined(CONFIG_BOARD_NATIVE_SIM)
+    k_msleep(2);
+#endif
 
     /* ---- SAMConfig ---- */
     LOG_INF("Sending SAMConfig command");
