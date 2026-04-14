@@ -61,14 +61,15 @@ static void uart_cb(const struct device *dev, void *user_data)
     }
 
     if (uart_irq_rx_ready(dev)) {
+        if (rx_len >= sizeof(rx_buf)) {
+            LOG_ERR("RX buffer overflow");
+            rx_len = 0;
+            return;
+        }
         int len = uart_fifo_read(dev, rx_buf + rx_len, sizeof(rx_buf) - rx_len);
         if (len > 0) {
             rx_len += len;
             LOG_HEXDUMP_INF(rx_buf, rx_len, "RX");
-        }
-        if (rx_len >= sizeof(rx_buf)) {
-            LOG_ERR("RX buffer overflow");
-            rx_len = 0;
         }
     }
 }
@@ -90,7 +91,7 @@ static bool wait_for_rx(size_t expected_len, int timeout_ms)
         if (rx_len >= expected_len) {
             return true;
         }
-        k_sleep(K_MSEC(1));
+        k_sleep(K_USEC(100));
     }
 
     return false;
@@ -110,7 +111,7 @@ static bool pn532_send_command(const uint8_t *cmd, size_t cmd_len)
         return false;
     }
 
-    if ((rx_len < sizeof(ack)) || (memcmp(rx_buf, ack, sizeof(ack)) != 0)) {
+    if (memcmp(rx_buf, ack, sizeof(ack)) != 0) {
         LOG_ERR("Invalid ACK");
         return false;
     }
@@ -119,7 +120,6 @@ static bool pn532_send_command(const uint8_t *cmd, size_t cmd_len)
 
     /* Did the response already start arriving right after ACK? */
     if (rx_len > sizeof(ack)) {
-        LOG_INF("Response already received");
         return true;
     }
 
@@ -130,7 +130,7 @@ static bool pn532_send_command(const uint8_t *cmd, size_t cmd_len)
             LOG_INF("Response received");
             return true;
         }
-        k_sleep(K_MSEC(1));
+        k_sleep(K_USEC(100));
     }
 
     LOG_ERR("Timeout waiting for response");
@@ -163,8 +163,15 @@ int main(void)
         return 0;
     }
     /* Check SAMConfig response manually */
-    if ((rx_len < 8) || (rx_buf[6] != 0x15)) {
-        LOG_ERR("Invalid SAMConfig response");
+    size_t resp_offset = sizeof(ack);
+
+    if (rx_len < resp_offset + 7) {
+        LOG_ERR("SAMConfig response too short");
+        return 0;
+    }
+
+    if (rx_buf[resp_offset + 6] != 0x15) {
+        LOG_ERR("Invalid SAMConfig response: 0x%02X", rx_buf[resp_offset + 6]);
         return 0;
     }
 
@@ -177,17 +184,18 @@ int main(void)
         return 0;
     }
     /* Parse firmware response manually */
-    if (rx_len < 12) {
+    resp_offset = sizeof(ack);
+    if (rx_len < resp_offset + 10) {
         LOG_ERR("Response too short");
         return 0;
     }
-    if (rx_buf[6] != 0x03) {
-        LOG_ERR("Unexpected response code: 0x%02X", rx_buf[6]);
+    if (rx_buf[resp_offset + 6] != 0x03) {
+        LOG_ERR("Unexpected response code: 0x%02X", rx_buf[resp_offset + 6]);
         return 0;
     }
-    const uint8_t ic  = rx_buf[7];
-    const uint8_t ver = rx_buf[8];
-    const uint8_t rev = rx_buf[9];
+    const uint8_t ic  = rx_buf[resp_offset + 7];
+    const uint8_t ver = rx_buf[resp_offset + 8];
+    const uint8_t rev = rx_buf[resp_offset + 9];
     LOG_INF("Found PN5%02X", ic);
     LOG_INF("Firmware version: %d.%d", ver, rev);
 
